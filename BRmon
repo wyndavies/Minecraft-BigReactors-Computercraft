@@ -1,0 +1,807 @@
+-- Monitor reactors, turbines and energy stores
+--
+-- This program attempts to balance the output of all reactors and turbines connected to it
+-- as well as monitoring energy store levels
+-- This might work with no reactors (e.g. a system using steam to power turbines) or no
+-- turbines or no power stores, but not tested.
+-- I did run this program with no turbines for a while, but 1 setup is not a full test
+
+-- The logic used is:
+-- If the energy store is nearly empty and the reactors+turbines are turned off, then turn them on
+-- If the energy store is nearly full and the reactors+turbines are turned on, then turn them off
+-- If the reactors+turbines are on:
+-- 		Reactor logic:
+--		If the temp is below the min value and the temp is not rising, raise the control rods
+--		If the temp is above the max value and the temp is not falling, lower the control rods
+--
+--		Turbine logic:
+--		If the rotor speed is below the min value and the speed is not rising, increase the steam flow
+--		If the rotor speed is above the max value and the speed is not falling, decrease the steam flow
+--		If the rotor speed is below the engage level and the coils are engaged, disengage the coils
+--		If the rotor speed is above the engage level and the coils are not engaged, engage the coils
+
+-- Constants
+local MinTemp = 800
+local MaxTemp = 1200
+local MinSpeed = 1820
+local MaxSpeed = 1840
+local EngageSpeed = 1700
+local MinPercent = 5
+local MaxPercent = 95
+local JoulesToRF = 2.5 -- Mekanism energy stores report energy in MJ, but everything else is in RF
+
+local debugBuild = true
+
+-- Global variables
+local pMonSmall1
+local pMonSmall2
+local pMonLarge
+local bMonSmall1Found = false
+local bMonSmall2Found = false
+local bMonLargeFound = false
+local bManualSettingChosen = false
+local pListOfMons = {}
+local pListOfMonsNums = {}
+local numMons = 0
+
+local bReactorFound = false
+local pReactor = {}
+local numReactors = 0
+local bTurbineFound = false
+local pTurbine = {}
+local numTurbines = 0
+local bEnergyStoreFound = false
+local pEnergyStore = {}
+local numEnergyStores = 0
+local pEnergyStoreType = {}
+-- Different energy storage types are handled
+-- 1 is for Mekanism storage. This is accessed by GetEnergy() and reports in Minecraft Joules
+-- 2 is for EnderIO storage. This is accessed by GetEnergyStored() and reports in Redstone Flux
+-- 2 appears to be the standard and not just for EnderIO
+
+-- Variables to hold information about the reactors, turbines and energy stores
+local bSystemOn
+local iTotEnergy
+local iMaxEnergy
+local iCurrEnergy = {}
+local iPrevEnergy = {}
+local fPercentage
+local fPrevTemp = {}
+local fCurrTemp = {}
+local fPrevRPM = {}
+local fCurrRPM = {}
+local fEnergyOut = {}
+local fFluidRate = {}
+local fFluidMax = {}
+
+
+function runAll()
+	-- Find the peripherals and look at them lovingly
+	local periList = peripheral.getNames()
+	for i = 1, #periList do
+		itemFound = peripheral.getType(periList[i])
+		if itemFound == "monitor" then
+			debugMessage("Found a monitor")
+			-- Add the monitor to the list
+			numMons = numMons + 1
+			pListOfMons[numMons] = peripheral.wrap(periList[i])
+			pListOfMonsNums[numMons] = 0
+		elseif itemFound == "BigReactors-Reactor" then
+			debugMessage("Found a Reactor")
+			numReactors = numReactors + 1
+			pReactor[numReactors] = peripheral.wrap(periList[i])
+			bReactorFound = true
+		elseif itemFound == "BigReactors-Turbine" then
+			debugMessage("Found a Turbine")
+			numTurbines = numTurbines + 1
+			pTurbine[numTurbines] = peripheral.wrap(periList[i])
+			bTurbineFound = true
+		elseif itemFound == "mekanism_machine" then
+		-- We will assume this is a mekanism energy store
+			debugMessage("Found a Mekanism Machine")
+			numEnergyStores = numEnergyStores + 1
+			pEnergyStore[numEnergyStores] = peripheral.wrap(periList[i])
+			pEnergyStoreType[numEnergyStores] = 1
+			bEnergyStoreFound = true
+		elseif itemFound == "capacitor_bank" then
+		-- An EnderIO Capacitor bank
+			debugMessage("Found an EnderIO Capacitor")
+			numEnergyStores = numEnergyStores + 1
+			pEnergyStore[numEnergyStores] = peripheral.wrap(periList[i])
+			pEnergyStoreType[numEnergyStores] = 2
+			bEnergyStoreFound = true
+		elseif itemFound == "draconic_storage_1" then
+		-- A Draconic Evolution Energy Core
+			debugMessage("Found a Draconic Evolution Energy Core")
+			numEnergyStores = numEnergyStores + 1
+			pEnergyStore[numEnergyStores] = peripheral.wrap(periList[i])
+			pEnergyStoreType[numEnergyStores] = 2
+			bEnergyStoreFound = true
+		else
+			debugMessage("Attached: "..itemFound)
+		end
+	end
+
+
+	-- Assign the monitors
+	-- Find the largest
+	-- Set text size on all monitors to 1 to stop weird things happening
+	for i = 1,numMons do
+		pListOfMons[i].setTextScale(1)
+	end
+	
+	local iTempMon = findLargestMon()
+	if iTempMon > 0 then
+		bMonLargeFound = true
+--		pMonLarge = pListOfMons[iTempMon]
+		pListOfMonsNums[iTempMon] = 1
+	end
+	-- Find the next largest
+	iTempMon = findLargestMon()
+	if iTempMon > 0 then
+		bMonSmall1Found = true
+--		pMonSmall1 = pListOfMons[iTempMon]
+		pListOfMonsNums[iTempMon] = 2
+	end
+	-- Find the next largest
+	iTempMon = findLargestMon()
+	if iTempMon > 0 then
+		bMonSmall2Found = true
+--		pMonSmall2 = pListOfMons[iTempMon]
+		pListOfMonsNums[iTempMon] = 3
+	end
+	assignMons()
+
+	--Clear the monitors
+	clearMons()
+	
+	-- An initial call to load up some basic data
+	init()
+	
+	-- Loop until 'q' is pressed
+	local bLoop = true
+	local event, key
+	while bLoop do
+	
+		-- Gather information about the turbines, reactors and energy stores
+		readStatus()
+
+		decideOnOff()
+
+		if bSystemOn == true then
+			adjustReactors()
+			adjustTurbines()
+		end
+
+-- Loop 3 times here with a pause, so we don't check and update the turbines and reactors too
+-- rapidly (it takes a little time for the effects of any changes we've made to register,
+-- so this avoids overadjusting)
+		for b = 1, 3 do
+			--Write to the monitors
+			writeToMons()
+			
+			os.startTimer(1)
+			-- pullEvent will wait for any event. Both a key press and a timer expiring
+			-- count as an event
+			event, key = os.pullEvent()
+			if event == "key" then
+				print("Key pressed = "..keys.getName(key))
+				if key == keys.q then
+					print("Q key pressed - exiting")
+					bLoop = false
+				elseif key == keys.o then
+					print("O key pressed - toggling system")
+					bManualSettingChosen = true
+					if bSystemOn == true then
+						turnAllOff()
+					else
+						turnAllOn()
+					end
+				elseif key == keys.one then
+					cycleMons(1)
+				elseif key == keys.two then
+					cycleMons(2)
+				elseif key == keys.three then
+					cycleMons(3)
+				end
+				-- Get rid of the char in the queue
+				os.pullEvent("char")
+			end
+		end
+	end
+end
+
+function findLargestMon()
+	if numMons == 0 then
+		return 0
+	end
+	-- Find the largest (except for any found earlier)
+	local iTempMon = 0
+	for i = 1,numMons do
+		if pListOfMonsNums[i] == 0 then
+			local X,Y = pListOfMons[i].getSize()
+			print("Monitor "..i.." - X:"..X.." Y:"..Y)
+			print("i = "..i.." and numMons = "..numMons)
+			if iTempMon == 0 then
+				iTempMon = i
+			else
+				local xValT, yValT = pListOfMons[iTempMon].getSize()
+				local xValM, yValM = pListOfMons[i].getSize()
+				if xValM > xValT then
+					iTempMon = i
+				end
+			end
+		end
+	end
+	print("Returning "..iTempMon.." as the largest monitor")
+	return iTempMon
+end
+
+
+function cycleMons(iMonitor)
+-- Find the monitor that matches the number entered and then cycle the monitor on
+-- to the next one that does not have a higher number
+	print("In cycle mons")
+-- Find the monitor's location in the list
+	local bLoop
+	local i
+	local iMonLoc = 0
+	if numMons >= iMonitor then
+		bLoop = true
+		i = 0
+		while bLoop == true do
+			i = i + 1
+			if i > numMons then
+				bLoop = false
+			else
+				if pListOfMonsNums[i] == iMonitor then
+					iMonLoc = i
+				end
+			end
+		end
+	end
+	print("iMonitor = "..iMonitor)
+	print("iMonLoc = "..iMonLoc)
+-- See if the next monitor in the list is free or has a monitor with a higher monitor
+-- (and wrap-around if at the end of list)
+	bLoop = true
+	if iMonLoc == 0 then
+		bLoop = false
+	end
+	local iNextMonLoc = iMonLoc
+	local bFoundNextMon = false
+	while bLoop == true do
+		iNextMonLoc = iNextMonLoc + 1
+		if iNextMonLoc > numMons then
+			iNextMonLoc = 1
+		end
+		if iNextMonLoc == iMonLoc then
+			bLoop = false
+		elseif pListOfMonsNums[iNextMonLoc] == 0 then
+			bLoop = false
+			bFoundNextMon = true
+		elseif pListOfMonsNums[iNextMonLoc] > iMonitor then
+			bLoop = false
+			bFoundNextMon = true
+		end
+	end
+
+	if bFoundNextMon == true then
+		local temp = pListOfMonsNums[iMonLoc]
+		pListOfMonsNums[iMonLoc] = pListOfMonsNums[iNextMonLoc]
+		pListOfMonsNums[iNextMonLoc] = temp
+	end
+	
+	assignMons()
+end
+
+function assignMons()
+	for i = 1,numMons do
+		if pListOfMonsNums[i] == 1 then
+			pMonLarge = pListOfMons[i]
+			print("Large Mon assign to "..i)
+		elseif pListOfMonsNums[i] == 2 then
+			pMonSmall1 = pListOfMons[i]
+			print("Small Mon 1 assign to "..i)
+		elseif pListOfMonsNums[i] == 3 then
+			pMonSmall2 = pListOfMons[i]
+			print("Small Mon 2 assign to "..i)
+		end
+	end
+	clearMons()
+end
+
+
+function clearMons()
+	if bMonSmall1Found then
+		pMonSmall1.clear()
+		pMonSmall1.setTextScale(1)
+	end
+
+	if bMonSmall2Found then
+		pMonSmall2.clear()
+		pMonSmall2.setTextScale(1)
+	end
+
+	if bMonLargeFound then
+		pMonLarge.clear()
+		pMonLarge.setTextScale(1)
+	end
+end
+
+function writeToMons()
+-- Write data out to the monitors
+if bMonSmall1Found then
+	writeToMon1()
+end
+if bMonSmall2Found then
+	writeToMon2()
+end
+if bMonLargeFound then
+	writeToMonLarge()
+end
+
+end
+
+function writeToMon1()
+	local pM = pMonSmall1
+	pM.setCursorPos(1,1)
+	pM.setTextScale(1)
+	
+-- Output information on the energy stores
+	pM.write("Number of energy stores: "..numEnergyStores)
+	pM.setCursorPos(1,2)
+	pM.write("Total Energy: "..iTotEnergy.."    ")
+	pM.setCursorPos(1,3)
+	pM.write("Max Energy: "..iMaxEnergy)
+	local energyChange = 0
+	for i = 1, numEnergyStores do
+		energyChange = energyChange + iCurrEnergy[i] - iPrevEnergy[i]
+	end
+	pM.setCursorPos(1,4)
+	energyChange = math.floor(energyChange / 20)
+	pM.write("Energy change: "..energyChange)
+
+-- Output information on the turbines
+	pM.setCursorPos(1,6)
+	pM.write("Number of turbines: "..numTurbines)
+	pM.setCursorPos(1,7)
+	pM.write("Energy output: ")
+	pM.setCursorPos(1,9)
+	pM.write("Turbine speed: ")
+	pM.setCursorPos(1,11)
+	pM.write("Turbine steam flow: ")
+	local lPos = 1
+	for i = 1, numTurbines do
+		pM.setCursorPos(lPos,8)
+		pM.write(math.floor(fEnergyOut[i]).."  ")
+		pM.setCursorPos(lPos,10)
+		pM.write(math.floor(fCurrRPM[i]).."  ")
+		pM.setCursorPos(lPos,12)
+		pM.write(math.floor(fFluidRate[i]).."  ")
+		lPos = lPos + 7
+	end
+end
+
+function writeToMon2()
+	local pM = pMonSmall2
+	pM.setCursorPos(1,1)
+	pM.setTextScale(1)
+	
+-- Output information on the reactors
+	pM.write("Number of reactors: "..numReactors)
+	pM.setCursorPos(1,2)
+	pM.write("Temperature: ")
+	pM.setCursorPos(1,4)
+	pM.write("Number of Control Rods: ")
+	pM.setCursorPos(1,6)
+	pM.write("Control Rod Levels: ")
+	local lPos = 1
+	local numRods
+	local aveRodLevel
+	for i = 1, numReactors do
+		pM.setCursorPos(lPos,3)
+		pM.write(math.floor(fCurrTemp[i]).." ")
+		pM.setCursorPos(lPos,5)
+		numRods = pReactor[i].getNumberOfControlRods()
+		pM.write(numRods.." ")
+		pM.setCursorPos(lPos,7)
+		aveRodLevel = 0
+		for j = 0,(numRods-1) do
+			aveRodLevel = aveRodLevel + pReactor[i].getControlRodLevel(j)
+		end
+		aveRodLevel = aveRodLevel / numRods
+		pM.write(math.floor(aveRodLevel).." ")
+		lPos = lPos + 7
+	end	
+end
+
+function writeToMonLarge()
+-- Write the main stuff we are interested in
+	pM = pMonLarge
+	pM.setTextScale(2)
+	pM.setCursorPos(1,13)
+	pM.write("R:")
+	for i = 1, numReactors do
+		if pReactor[i].getActive() then
+			pM.write("O")
+		else
+			pM.write("X")
+		end
+	end
+	x = numReactors + 4
+	pM.setCursorPos(x,13)
+	pM.write("T:")
+	for i = 1, numTurbines do
+		if pTurbine[i].getActive() then
+			pM.write("O")
+		else
+			pM.write("X")
+		end
+	end
+	
+	local lPos1 = 5
+	local lPos2 = 20
+	
+	-- Get total energy output
+	--iEnergy = 0
+	local iAveRPM = 0
+	for i = 1, numTurbines do
+--		iEnergy = iEnergy + fEnergyOut[i]
+		iAveRPM = iAveRPM + fCurrRPM[i]
+	end
+--	iEnergy = math.floor(iEnergy)
+	local energyChange = 0
+	for i = 1, numEnergyStores do
+		energyChange = energyChange + iCurrEnergy[i] - iPrevEnergy[i]
+	end
+	energyChange = math.floor(energyChange / 20)
+	
+	pM.setCursorPos(lPos1,2)
+	pM.write("Energy Change")
+	pM.setCursorPos(lPos2,2)
+	pM.write(energyChange.."  ")
+	
+	-- Get average turbine rotor speed
+	iAveRPM = math.floor(iAveRPM / numTurbines)
+	pM.setCursorPos(lPos1,4)
+	pM.write("Rotor Speed")
+	pM.setCursorPos(lPos2,4)
+	pM.write(iAveRPM.."  ")
+	
+	-- Get average reactor temperature
+	iAveTemp = 0
+	for i = 1, numReactors do
+		iAveTemp = iAveTemp + pReactor[i].getFuelTemperature()
+	end
+	iAveTemp = math.floor(iAveTemp / numReactors)
+	
+	pM.setCursorPos(lPos1,6)
+	pM.write("Reactor Temp")
+	pM.setCursorPos(lPos2,6)
+	pM.write(iAveTemp.."  ")
+	
+	-- Get percentage of energy stored filled
+	pM.setCursorPos(lPos1,8)
+	pM.write("Energy %")
+	pM.setCursorPos(lPos2,8)
+	pM.write(fPercentage.."%  ")
+	
+	-- Write out the fluid flow level
+	pM.setCursorPos(lPos1,11)
+	pM.write("Fluid Flow")
+	pM.setCursorPos(lPos2,11)
+	local averageFluidRate = 0
+	for i = 1, numTurbines do
+		averageFluidRate = averageFluidRate + fFluidRate[i]
+	end
+	averageFluidRate = math.floor(averageFluidRate / numTurbines)
+	pM.write(averageFluidRate.." ")
+end
+
+function readStatus()
+-- Read the values in reactors, turbines and energy stores
+
+-- Read the energy stores
+	iTotEnergy = 0
+	iMaxEnergy = 0
+	
+	for i = 1, numEnergyStores do
+		iPrevEnergy[i] = iCurrEnergy[i]
+		if pEnergyStoreType[i] == 1 then
+			iCurrEnergy[i] = (pEnergyStore[i].getEnergy() / JoulesToRF)
+			iMaxEnergy = iMaxEnergy + (pEnergyStore[i].getMaxEnergy() / JoulesToRF)
+		elseif pEnergyStoreType[i] == 2 then
+			iCurrEnergy[i] = pEnergyStore[i].getEnergyStored()
+			iMaxEnergy = iMaxEnergy + pEnergyStore[i].getMaxEnergyStored()
+		else
+			print("Error... unknown energy store type")
+		end
+		iTotEnergy = iTotEnergy + iCurrEnergy[i]
+	end
+
+
+-- Read the reactors
+	for i = 1, numReactors do
+		fPrevTemp[i] = fCurrTemp[i]
+		fCurrTemp[i] = pReactor[i].getFuelTemperature()
+	end
+
+-- Read the turbines
+	for i = 1, numTurbines do
+		fPrevRPM[i] = fCurrRPM[i]
+		fCurrRPM[i] = pTurbine[i].getRotorSpeed()
+		fEnergyOut[i] = pTurbine[i].getEnergyProducedLastTick()
+		fFluidRate[i] = pTurbine[i].getFluidFlowRateMax()
+	end
+
+end
+
+function decideOnOff()
+	if bManualSettingChosen == true then
+		return
+	end
+	-- Decide if to turn the system on or off
+	fPercentage = iTotEnergy / iMaxEnergy
+	fPercentage = math.floor(fPercentage * 10000)
+	fPercentage = fPercentage / 100
+	
+	if fPercentage < MinPercent then
+		if bSystemOn == false then
+			turnAllOn()
+		end
+	elseif fPercentage > MaxPercent then
+		if bSystemOn == true then
+			turnAllOff()
+		end
+	end
+end
+
+function adjustReactors()
+-- 		Reactor logic:
+--		If the temp is below the min value and the temp is not rising, raise the control rods
+--		If the temp is above the max value and the temp is not falling, lower the control rods
+
+-- Rod adjustment is in another function. The function tries to balance the rods
+
+	for i = 1, numReactors do
+		if fCurrTemp[i] < MinTemp then
+			if fCurrTemp[i] <= fPrevTemp[i] then
+			print("fCurrTemp "..fCurrTemp[i].." fPrevTemp "..fPrevTemp[i])
+				-- Adjust the rods to increase the temp
+				-- The further off the target temp, the bigger the adjustment
+				adjustmentAmount = (MinTemp - fCurrTemp[i]) / MinTemp
+				adjustmentAmount = math.floor(adjustmentAmount * 10)
+				if adjustmentAmount < 1 then
+					adjustmentAmount = 1
+				end
+				adjustReactorRodsUp(i, adjustmentAmount)
+			end
+		elseif fCurrTemp[i] > MaxTemp then
+			if fCurrTemp[i] >= fPrevTemp[i] then
+				-- Adjust the rods to decrease the temp
+				adjustmentAmount = (fCurrTemp[i] - MaxTemp) / MaxTemp
+				adjustmentAmount = math.floor(adjustmentAmount * 20)
+				if adjustmentAmount < 1 then
+					adjustmentAmount = 1
+				end
+				print("Lowering rods by "..adjustmentAmount)
+				adjustReactorRodsDown(i, adjustmentAmount)
+			end
+		end
+	end
+
+end
+
+function adjustReactorRodsUp(reactorNum, adjustments)
+-- Find the lowest reactor rod and move it up (reduce the value)
+-- If the rod is already set to zero, then nothing to do (lowest rod will be
+-- left at -1)
+	for i = 1, adjustments do
+
+		local lowest = -1
+		local lowestValue = 0
+		
+		for r = 0, (pReactor[reactorNum].getNumberOfControlRods()-1) do
+			if pReactor[reactorNum].getControlRodLevel(r) > lowestValue then
+				lowestValue = pReactor[reactorNum].getControlRodLevel(r)
+				lowest = r
+			end
+		end
+		
+		if lowest > -1 then
+			pReactor[reactorNum].setControlRodLevel(lowest, lowestValue-1)
+		end
+	end
+end
+
+function adjustReactorRodsDown(reactorNum, adjustments)
+-- Find the highest reactor rod and move it down (increase the value)
+	for i = 1, adjustments do
+
+		local highest = -1
+		local highestValue = 100
+		
+		for r = 0, (pReactor[reactorNum].getNumberOfControlRods()-1) do
+			if pReactor[reactorNum].getControlRodLevel(r) < highestValue then
+				highestValue = pReactor[reactorNum].getControlRodLevel(r)
+				highest = r
+			end
+		end
+		
+		if highest > -1 then
+			pReactor[reactorNum].setControlRodLevel(highest, highestValue+1)
+		end
+	end
+end
+
+
+function adjustTurbines()
+--		Turbine logic:
+--		If the rotor speed is below the min value and the speed is not rising, increase the steam flow
+--		If the rotor speed is above the max value and the speed is not falling, decrease the steam flow
+--		If the rotor speed is below the engage level and the coils are engaged, disengage the coils
+--		If the rotor speed is above the engage level and the coils are not engaged, engage the coils
+
+-- To do/fix... the turbines still take a long time to get to the right fluid flow level
+-- and even so they still overadjust and oscilate back and forth a couple of times
+
+
+-- Loop through the turbines
+	for i = 1, numTurbines do
+-- Check if to engage the coils or not		
+		if fCurrRPM[i] < EngageSpeed then
+			if pTurbine[i].getInductorEngaged() == true then
+				print("Disengaged coils")
+				pTurbine[i].setInductorEngaged(false)
+			end
+		elseif fCurrRPM[i] > EngageSpeed then
+			if pTurbine[i].getInductorEngaged() == false then
+				print("Engaged coils")
+				pTurbine[i].setInductorEngaged(true)
+			end
+		end
+
+-- Check to see if to change the steam flow
+-- The further we are from the target speed, the bigger the adjustment made
+		if fCurrRPM[i] < MinSpeed then
+			if fCurrRPM[i] <= (fPrevRPM[i] + 0.2) then
+				if (math.floor(fFluidRate[i]*10)) < (math.floor(fFluidMax[i]*10)) then
+					print("Increased fluid flow rate in turbine "..i)
+					local increaseAmount = ((MinSpeed - fCurrRPM[i]) / MinSpeed) * 20
+					if increaseAmount < 1 then
+						increaseAmount = 1
+					end
+					increaseAmount = math.floor(increaseAmount + fFluidRate[i])
+					if increaseAmount > fFluidMax[i] then
+						increaseAmount = fFluidMax[i]
+					end
+					pTurbine[i].setFluidFlowRateMax(increaseAmount)
+				end
+			end
+		elseif fCurrRPM[i] > MaxSpeed then
+			if fCurrRPM[i] >= (fPrevRPM[i] - 0.2) then
+				if fFluidRate[i] > 0 then
+					print("Decreased fluid flow rate in turbine "..i)
+					local decreaseAmount = ((fCurrRPM[i] - MaxSpeed) / MaxSpeed) * 20
+					if decreaseAmount < 1 then
+						decreaseAmount = 1
+					end
+					decreaseAmount = fFluidRate[i] - decreaseAmount
+					if decreaseAmount < 0 then
+						decreaseAmount = 0
+					end
+					pTurbine[i].setFluidFlowRateMax(decreaseAmount)
+				end
+			end
+		else
+		-- To get here we must be in the right speed range
+			local rpmChange = fCurrRPM[i] - fPrevRPM[i]
+			if rpmChange > 0.05 then
+			-- Speed is increasing - reduce fluid flow
+				print("Decrease flow for turbine "..i)
+				pTurbine[i].setFluidFlowRateMax(fFluidRate[i] - 1)
+			elseif rpmChange < -0.05 then
+				print("Increase flow for turbine "..i)
+				pTurbine[i].setFluidFlowRateMax(fFluidRate[i] + 1)
+			end
+		end
+
+	end
+end
+
+function checkStatus()
+-- If any reactor is on set the flag to on (and turn all on + turn on turbines)
+-- otherwise set the flag off
+	bAnyOn = false
+	for i = 1, numReactors do
+		if pReactor[i].getActive() == true then
+			bAnyOn = true
+		end
+	end
+	
+	if bAnyOn == true then
+		turnAllOn()
+	else
+		turnAllOff()
+	end
+
+end
+
+function turnAllOn()
+-- Turn all the reactors and turbines on
+	print("Turning system on")
+	for i = 1, numReactors do
+		pReactor[i].setActive(true)
+	end
+	for i = 1, numTurbines do
+		pTurbine[i].setActive(true)
+	end
+	bSystemOn = true
+end
+
+function turnAllOff()
+-- Turn all the reactors off, but leave the turbines on
+	print("Turning system off")
+	for i = 1, numReactors do
+		pReactor[i].setActive(false)
+	end
+	for i = 1, numTurbines do
+		pTurbine[i].setActive(true)
+	end
+	bSystemOn = false
+end
+
+function init()
+-- Read some initial values
+-- This stops weird bugs when comparing current and previous values
+
+-- Read the energy stores
+for i = 1, numEnergyStores do
+	if pEnergyStoreType[i] == 1 then
+		iCurrEnergy[i] = (pEnergyStore[i].getEnergy() / JoulesToRF)
+	elseif pEnergyStoreType[i] == 2 then
+		iCurrEnergy[i] = pEnergyStore[i].getEnergyStored()
+	end
+	iPrevEnergy[i] = iCurrEnergy[i]
+	end
+
+-- Read the reactors
+	for i = 1, numReactors do
+		fCurrTemp[i] = pReactor[i].getFuelTemperature()
+		fPrevTemp[i] = fCurrTemp[i]
+	end
+
+-- Read the turbines
+	for i = 1, numTurbines do
+		fCurrRPM[i] = pTurbine[i].getRotorSpeed()
+		fPrevRPM[i] = fCurrRPM[i]
+		fFluidMax[i] = pTurbine[i].getFluidFlowRateMaxMax()
+	end
+	
+-- Make sure all the reactors and turbines are set the same (in case of manual tinkering)
+	checkStatus()
+end
+
+function printOut(xLoc, yLoc, message, monitor)
+
+end
+
+function debugMessage(message)
+	if debugBuild == true then
+		print(message)
+	end
+end
+
+function write(monitor, posx, posy, size, colour, text)
+
+end
+
+-- And here is where we actually start everything off
+-- This command is at the end because LUA (or at least ComputerCraft's implementation)
+-- has code that is only aware of functions that have already been read.
+-- So by forcing LUA to read all the functions before running any actual code, it
+-- will have seen all the functions and we can be sure that nothing will get upset,
+-- claiming it is trying to call a function that doesn't exist.
+-- So start at the end and all will be well.
+runAll()
