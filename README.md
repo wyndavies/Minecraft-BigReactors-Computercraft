@@ -18,6 +18,6 @@ It responds to some key presses:
 
 To do:
 - Prettify the text output. It is very basic at the moment
-- Work out why the time delay vanishes after pressing a key
-- Save which displays are showing primary, secondary and tertiary info and restore them on program restart
+- Work out why the time delay vanishes after pressing a key (fixed)
+- Save which displays are showing primary, secondary and tertiary info and restore them on program restart (done)
 - Add support for wireless connections.
