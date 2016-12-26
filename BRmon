@@ -43,6 +43,7 @@ local bManualSettingChosen = false
 local pListOfMons = {}
 local pListOfMonsNums = {}
 local numMons = 0
+local fnMonitor = "MonitorList"
 
 local bReactorFound = false
 local pReactor = {}
@@ -130,25 +131,85 @@ function runAll()
 		pListOfMons[i].setTextScale(1)
 	end
 	
-	local iTempMon = findLargestMon()
-	if iTempMon > 0 then
-		bMonLargeFound = true
---		pMonLarge = pListOfMons[iTempMon]
-		pListOfMonsNums[iTempMon] = 1
+	local bMonFileFound = false
+	
+	-- First check to see if we have saved information about which monitors
+	-- display what
+	if fs.exists(fnMonitor) then
+		debugMessage("Found the file")
+		-- The file exists, but does it contain valid data?
+		local fsMonList = fs.open(fnMonitor, "r")
+		-- First should be the number of monitors
+		local lineRead = fsMonList.readLine()
+		if lineRead ~= nil  then
+			local numRead = tonumber(lineRead)
+			debugMessage("Read number of monitors as "..numRead)
+			debugMessage("The number of monitors is "..numMons)
+			local bTest = numRead == numMons
+			if(bTest) then
+				debugMessage("The test gives true")
+			else
+				debugMessage("The test gives false")
+			end
+			if numRead == numMons then
+				-- The number of monitors matches up.
+				-- So now read the value
+				local loopCount = 0
+				lineRead = fsMonList.readLine()
+				while loopCount < numMons and lineRead ~= nil do
+					loopCount = loopCount + 1
+					numRead = tonumber(lineRead)
+					pListOfMonsNums[loopCount] = numRead
+					debugMessage("Read setting for "..loopCount.." as "..numRead)
+					if numRead == 1 then
+						bMonLargeFound = true
+					elseif numRead == 2 then
+						bMonSmall1Found = true
+					elseif numRead == 3 then
+						bMonSmall2Found = true
+					end
+					lineRead = fsMonList.readLine()
+				end
+				-- If loopCount equals numMons then we read everything,
+				-- otherwise something went wrong so clear out the listofmonsnums table
+				-- and the file
+				if loopCount == numMons then
+					bMonFileFound = true
+				else
+					for i = 1,numMons do
+						pListOfMonsNums[i] = 0
+					end
+					bMonLargeFound = false
+					bMonSmall1Found = false
+					bMonSmall2Found = false
+					debugMessage("Deleting the file")
+					fs.delete(fnMonitor)
+				end
+			end
+		end
+		fsMonList.close()
 	end
-	-- Find the next largest
-	iTempMon = findLargestMon()
-	if iTempMon > 0 then
-		bMonSmall1Found = true
---		pMonSmall1 = pListOfMons[iTempMon]
-		pListOfMonsNums[iTempMon] = 2
-	end
-	-- Find the next largest
-	iTempMon = findLargestMon()
-	if iTempMon > 0 then
-		bMonSmall2Found = true
---		pMonSmall2 = pListOfMons[iTempMon]
-		pListOfMonsNums[iTempMon] = 3
+	if(bMonFileFound == false) then
+		local iTempMon = findLargestMon()
+		if iTempMon > 0 then
+			bMonLargeFound = true
+	--		pMonLarge = pListOfMons[iTempMon]
+			pListOfMonsNums[iTempMon] = 1
+		end
+		-- Find the next largest
+		iTempMon = findLargestMon()
+		if iTempMon > 0 then
+			bMonSmall1Found = true
+	--		pMonSmall1 = pListOfMons[iTempMon]
+			pListOfMonsNums[iTempMon] = 2
+		end
+		-- Find the next largest
+		iTempMon = findLargestMon()
+		if iTempMon > 0 then
+			bMonSmall2Found = true
+	--		pMonSmall2 = pListOfMons[iTempMon]
+			pListOfMonsNums[iTempMon] = 3
+		end
 	end
 	assignMons()
 
@@ -161,6 +222,7 @@ function runAll()
 	-- Loop until 'q' is pressed
 	local bLoop = true
 	local event, key
+	local bStartedTimer = false
 	while bLoop do
 	
 		-- Gather information about the turbines, reactors and energy stores
@@ -180,17 +242,35 @@ function runAll()
 			--Write to the monitors
 			writeToMons()
 			
-			os.startTimer(1)
+			--To stop multiple timers running at once, I've added a flag
+			if(bStartedTimer == false) then
+				os.startTimer(1)
+				bStartedTimer = true
+			end
 			-- pullEvent will wait for any event. Both a key press and a timer expiring
 			-- count as an event
 			event, key = os.pullEvent()
 			if event == "key" then
-				print("Key pressed = "..keys.getName(key))
+				debugMessage("Key pressed = "..keys.getName(key))
 				if key == keys.q then
-					print("Q key pressed - exiting")
+					debugMessage("Q key pressed - exiting")
+					-- Save the monitor assignments
+					--if fs.exists(fnMonitor) then
+					--	fs.delete(fnMonitor)
+					--end
+					local fsWriteMons = fs.open(fnMonitor, "w")
+					if fsWriteMons ~= nil then
+					-- Save the number of monitors
+						fsWriteMons.writeLine(numMons)
+						-- Now write out the monitor settings
+						for i = 1,numMons do
+							fsWriteMons.writeLine(pListOfMonsNums[i])
+						end
+						fsWriteMons.close()
+					end
 					bLoop = false
 				elseif key == keys.o then
-					print("O key pressed - toggling system")
+					debugMessage("O key pressed - toggling system")
 					bManualSettingChosen = true
 					if bSystemOn == true then
 						turnAllOff()
@@ -207,6 +287,9 @@ function runAll()
 				-- Get rid of the char in the queue
 				os.pullEvent("char")
 			end
+			if event == "timer" then
+				bStartedTimer = false
+			end
 		end
 	end
 end
@@ -220,8 +303,8 @@ function findLargestMon()
 	for i = 1,numMons do
 		if pListOfMonsNums[i] == 0 then
 			local X,Y = pListOfMons[i].getSize()
-			print("Monitor "..i.." - X:"..X.." Y:"..Y)
-			print("i = "..i.." and numMons = "..numMons)
+			debugMessage("Monitor "..i.." - X:"..X.." Y:"..Y)
+			debugMessage("i = "..i.." and numMons = "..numMons)
 			if iTempMon == 0 then
 				iTempMon = i
 			else
@@ -233,7 +316,7 @@ function findLargestMon()
 			end
 		end
 	end
-	print("Returning "..iTempMon.." as the largest monitor")
+	debugMessage("Returning "..iTempMon.." as the largest monitor")
 	return iTempMon
 end
 
@@ -241,7 +324,7 @@ end
 function cycleMons(iMonitor)
 -- Find the monitor that matches the number entered and then cycle the monitor on
 -- to the next one that does not have a higher number
-	print("In cycle mons")
+	debugMessage("In cycle mons")
 -- Find the monitor's location in the list
 	local bLoop
 	local i
@@ -260,8 +343,8 @@ function cycleMons(iMonitor)
 			end
 		end
 	end
-	print("iMonitor = "..iMonitor)
-	print("iMonLoc = "..iMonLoc)
+	debugMessage("iMonitor = "..iMonitor)
+	debugMessage("iMonLoc = "..iMonLoc)
 -- See if the next monitor in the list is free or has a monitor with a higher monitor
 -- (and wrap-around if at the end of list)
 	bLoop = true
@@ -299,13 +382,13 @@ function assignMons()
 	for i = 1,numMons do
 		if pListOfMonsNums[i] == 1 then
 			pMonLarge = pListOfMons[i]
-			print("Large Mon assign to "..i)
+			debugMessage("Large Mon assign to "..i)
 		elseif pListOfMonsNums[i] == 2 then
 			pMonSmall1 = pListOfMons[i]
-			print("Small Mon 1 assign to "..i)
+			debugMessage("Small Mon 1 assign to "..i)
 		elseif pListOfMonsNums[i] == 3 then
 			pMonSmall2 = pListOfMons[i]
-			print("Small Mon 2 assign to "..i)
+			debugMessage("Small Mon 2 assign to "..i)
 		end
 	end
 	clearMons()
@@ -313,19 +396,9 @@ end
 
 
 function clearMons()
-	if bMonSmall1Found then
-		pMonSmall1.clear()
-		pMonSmall1.setTextScale(1)
-	end
-
-	if bMonSmall2Found then
-		pMonSmall2.clear()
-		pMonSmall2.setTextScale(1)
-	end
-
-	if bMonLargeFound then
-		pMonLarge.clear()
-		pMonLarge.setTextScale(1)
+	for i = 1,numMons do
+		pListOfMons[i].clear()
+		pListOfMons[i].setTextScale(1)
 	end
 end
 
@@ -349,7 +422,8 @@ function writeToMon1()
 	pM.setTextScale(1)
 	
 -- Output information on the energy stores
-	pM.write("Number of energy stores: "..numEnergyStores)
+	monwrite(pM, 1, 1, colours.orange, colours.blue, "Number of energy stores: "..numEnergyStores)
+--	pM.write("Number of energy stores: "..numEnergyStores)
 	pM.setCursorPos(1,2)
 	pM.write("Total Energy: "..iTotEnergy.."    ")
 	pM.setCursorPos(1,3)
@@ -515,7 +589,7 @@ function readStatus()
 			iCurrEnergy[i] = pEnergyStore[i].getEnergyStored()
 			iMaxEnergy = iMaxEnergy + pEnergyStore[i].getMaxEnergyStored()
 		else
-			print("Error... unknown energy store type")
+			debugMessage("Error... unknown energy store type")
 		end
 		iTotEnergy = iTotEnergy + iCurrEnergy[i]
 	end
@@ -567,7 +641,7 @@ function adjustReactors()
 	for i = 1, numReactors do
 		if fCurrTemp[i] < MinTemp then
 			if fCurrTemp[i] <= fPrevTemp[i] then
-			print("fCurrTemp "..fCurrTemp[i].." fPrevTemp "..fPrevTemp[i])
+			debugMessage("fCurrTemp "..fCurrTemp[i].." fPrevTemp "..fPrevTemp[i])
 				-- Adjust the rods to increase the temp
 				-- The further off the target temp, the bigger the adjustment
 				adjustmentAmount = (MinTemp - fCurrTemp[i]) / MinTemp
@@ -585,7 +659,7 @@ function adjustReactors()
 				if adjustmentAmount < 1 then
 					adjustmentAmount = 1
 				end
-				print("Lowering rods by "..adjustmentAmount)
+				debugMessage("Lowering rods by "..adjustmentAmount)
 				adjustReactorRodsDown(i, adjustmentAmount)
 			end
 		end
@@ -652,12 +726,12 @@ function adjustTurbines()
 -- Check if to engage the coils or not		
 		if fCurrRPM[i] < EngageSpeed then
 			if pTurbine[i].getInductorEngaged() == true then
-				print("Disengaged coils")
+				debugMessage("Disengaged coils")
 				pTurbine[i].setInductorEngaged(false)
 			end
 		elseif fCurrRPM[i] > EngageSpeed then
 			if pTurbine[i].getInductorEngaged() == false then
-				print("Engaged coils")
+				debugMessage("Engaged coils")
 				pTurbine[i].setInductorEngaged(true)
 			end
 		end
@@ -667,7 +741,7 @@ function adjustTurbines()
 		if fCurrRPM[i] < MinSpeed then
 			if fCurrRPM[i] <= (fPrevRPM[i] + 0.2) then
 				if (math.floor(fFluidRate[i]*10)) < (math.floor(fFluidMax[i]*10)) then
-					print("Increased fluid flow rate in turbine "..i)
+					debugMessage("Increased fluid flow rate in turbine "..i)
 					local increaseAmount = ((MinSpeed - fCurrRPM[i]) / MinSpeed) * 20
 					if increaseAmount < 1 then
 						increaseAmount = 1
@@ -682,7 +756,7 @@ function adjustTurbines()
 		elseif fCurrRPM[i] > MaxSpeed then
 			if fCurrRPM[i] >= (fPrevRPM[i] - 0.2) then
 				if fFluidRate[i] > 0 then
-					print("Decreased fluid flow rate in turbine "..i)
+					debugMessage("Decreased fluid flow rate in turbine "..i)
 					local decreaseAmount = ((fCurrRPM[i] - MaxSpeed) / MaxSpeed) * 20
 					if decreaseAmount < 1 then
 						decreaseAmount = 1
@@ -699,10 +773,10 @@ function adjustTurbines()
 			local rpmChange = fCurrRPM[i] - fPrevRPM[i]
 			if rpmChange > 0.05 then
 			-- Speed is increasing - reduce fluid flow
-				print("Decrease flow for turbine "..i)
+				debugMessage("Decrease flow for turbine "..i)
 				pTurbine[i].setFluidFlowRateMax(fFluidRate[i] - 1)
 			elseif rpmChange < -0.05 then
-				print("Increase flow for turbine "..i)
+				debugMessage("Increase flow for turbine "..i)
 				pTurbine[i].setFluidFlowRateMax(fFluidRate[i] + 1)
 			end
 		end
@@ -730,7 +804,7 @@ end
 
 function turnAllOn()
 -- Turn all the reactors and turbines on
-	print("Turning system on")
+	debugMessage("Turning system on")
 	for i = 1, numReactors do
 		pReactor[i].setActive(true)
 	end
@@ -742,7 +816,7 @@ end
 
 function turnAllOff()
 -- Turn all the reactors off, but leave the turbines on
-	print("Turning system off")
+	debugMessage("Turning system off")
 	for i = 1, numReactors do
 		pReactor[i].setActive(false)
 	end
@@ -783,18 +857,26 @@ for i = 1, numEnergyStores do
 	checkStatus()
 end
 
-function printOut(xLoc, yLoc, message, monitor)
-
-end
-
 function debugMessage(message)
 	if debugBuild == true then
 		print(message)
 	end
 end
 
-function write(monitor, posx, posy, size, colour, text)
-
+function monwrite(monitor, posx, posy, foreColour, backColour, text)
+-- Pass in a monitor, the x & y positions, the colour and the text
+	local currTextColour = monitor.getTextColour()
+	local currBackColour = monitor.getBackgroundColour()
+	if monitor.isColour() then
+		monitor.setTextColour(foreColour)
+		monitor.setBackgroundColour(backColour)
+	end
+	monitor.setCursorPos(posx, posy)
+	monitor.write(text)
+	if monitor.isColour() then
+		monitor.setTextColour(currTextColour)
+		monitor.setBackgroundColour(currBackColour)
+	end
 end
 
 -- And here is where we actually start everything off
