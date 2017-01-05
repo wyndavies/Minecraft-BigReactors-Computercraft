@@ -1,5 +1,5 @@
 # Minecraft-BigReactors-Computercraft
-Computercraft program for controlling BigReactor reactors and turbines, for use in modded Minecraft
+Computercraft (LUA) program for controlling BigReactor reactors and turbines, for use in modded Minecraft
 
 This is still a work in progress.
 
